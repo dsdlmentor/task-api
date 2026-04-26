@@ -1,6 +1,11 @@
-# Mentoring week 05
+# task-api
 
-Учебный репозиторий: Git + FastAPI.
+CRUD-сервис для управления задачами. FastAPI + Docker + автодеплой.
 
-**Автор**: Ivan Ivanov
-**Начало работы**: 2025-03-15
+## Локальный запуск
+
+```bash
+conda create -y -n task-api python=3.11
+conda activate task-api
+pip install -r requirements.txt
+uvicorn app.main:app --reload
