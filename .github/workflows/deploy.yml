@@ -5,7 +5,7 @@ on:
     branches: [main]
 
 env:
-  IMAGE: ghcr.io/${{ github.repository_owner }}/task-api
+  IMAGE: ghcr.io/${{ github.repository_owner }}/rag-app
 
 jobs:
   deploy:
@@ -25,6 +25,7 @@ jobs:
         with:
           context: .
           push: true
+          platforms: linux/amd64
           tags: |
             ${{ env.IMAGE }}:${{ github.sha }}
             ${{ env.IMAGE }}:latest
@@ -36,13 +37,47 @@ jobs:
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           script: |
+            set -e
             echo "${{ secrets.GHCR_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+            # Ensure mentoring-net exists (idempotent)
+            docker network create mentoring-net 2>/dev/null || true
+
+            # Ensure qdrant_data + rag-service host dirs exist
+            mkdir -p /opt/qdrant_data /opt/rag-service/data
+
+            # Write .env from secrets on every deploy
+            cat > /opt/rag-service/.env <<EOF
+            LLM_BASE_URL=${{ secrets.LLM_BASE_URL }}
+            LLM_API_KEY=${{ secrets.LLM_API_KEY }}
+            LLM_MODEL=${{ secrets.LLM_MODEL }}
+            QDRANT_URL=http://qdrant:6333
+            EOF
+            chmod 600 /opt/rag-service/.env
+
             docker pull ${{ env.IMAGE }}:latest
-            docker rm -f task-api 2>/dev/null || true
+
+            # Replace the running container atomically
+            docker rm -f rag-app 2>/dev/null || true
             docker run -d \
-              --name task-api \
+              --name rag-app \
+              --network mentoring-net \
               --restart unless-stopped \
               -p 127.0.0.1:8000:8000 \
-              -e LOG_LEVEL=INFO \
+              --env-file /opt/rag-service/.env \
+              -v /opt/rag-service/data:/app/data \
               ${{ env.IMAGE }}:latest
-            docker logout ghcr.io
+
+            # Wait until /health responds before declaring success
+            for i in 1 2 3 4 5 6 7 8 9 10; do
+              if curl -sf http://127.0.0.1:8000/health > /dev/null; then
+                echo "Service healthy"
+                exit 0
+              fi
+              echo "Waiting for /health... ($i/10)"
+              sleep 3
+            done
+
+            echo "Service failed to become healthy"
+            docker logs --tail 50 rag-app
+            exit 1
