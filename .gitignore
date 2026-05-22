@@ -206,3 +206,7 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+qdrant_data/
+# Generated corpus only — keep data/local/about.md tracked
+data/corpus_chunks.jsonl
+.env
