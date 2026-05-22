@@ -26,6 +26,18 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      - name: Create empty sklearn_docs collection in Qdrant
+        run: |
+          # Wait for Qdrant service to accept requests
+          for i in 1 2 3 4 5; do
+            curl -sf http://localhost:6333/ > /dev/null && break
+            sleep 2
+          done
+          # Create collection so app.lifespan can wire the retriever
+          curl -X PUT "http://localhost:6333/collections/sklearn_docs" \
+            -H "Content-Type: application/json" \
+            -d '{"vectors": {"size": 384, "distance": "Cosine"}}'
+
       - name: Run tests
         env:
           LLM_BASE_URL: https://openrouter.ai/api/v1
