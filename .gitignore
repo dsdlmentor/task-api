@@ -207,5 +207,6 @@ marimo/_static/
 marimo/_lsp/
 __marimo__/
 qdrant_data/
-data/
+# Generated corpus only — keep data/local/about.md tracked
+data/corpus_chunks.jsonl
 .env
