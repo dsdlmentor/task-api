@@ -1,8 +1,13 @@
 """Load + chunk the scikit-learn documentation corpus.
 
-The corpus covers the entire Classic ML cycle of the course (weeks 7-10):
-linear models, decision trees, ensembles, cross-validation, metrics,
-preprocessing, pipelines, grid search, missing values, feature selection.
+We start small on purpose: three sklearn modules covering the most-asked
+Classic ML topics — linear models (Ridge / Lasso / logistic regression),
+decision trees, and evaluation metrics. About ~150 chunks total — fits
+into 2 GB RAM during indexing and gives a meaningful demo.
+
+Adding more modules (ensembles, preprocessing, pipelines, grid search,
+imputers, feature selection) is an optional homework — see content.md
+section "Расширение корпуса".
 
 Local markdown files in data/local/*.md are also indexed — they hold
 the service self-description ("about.md") so the bot can answer
@@ -17,22 +22,10 @@ from langchain_community.document_loaders import RecursiveUrlLoader
 from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
-# scikit-learn sections covering the entire Classic ML cycle of the course
 SEED_URLS = [
-    # Models
     "https://scikit-learn.org/stable/modules/linear_model.html",
     "https://scikit-learn.org/stable/modules/tree.html",
-    "https://scikit-learn.org/stable/modules/ensemble.html",
-    # Validation + metrics
-    "https://scikit-learn.org/stable/modules/cross_validation.html",
     "https://scikit-learn.org/stable/modules/model_evaluation.html",
-    # Data handling
-    "https://scikit-learn.org/stable/modules/preprocessing.html",
-    "https://scikit-learn.org/stable/modules/impute.html",
-    "https://scikit-learn.org/stable/modules/feature_selection.html",
-    # Workflow
-    "https://scikit-learn.org/stable/modules/compose.html",
-    "https://scikit-learn.org/stable/modules/grid_search.html",
 ]
 
 LOCAL_DIR = Path("data/local")
