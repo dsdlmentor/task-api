@@ -40,9 +40,9 @@ jobs:
 
       - name: Run tests
         env:
-          LLM_BASE_URL: https://openrouter.ai/api/v1
+          # Only api_key is required by app.config.Settings — everything
+          # else has a sensible default in app/config.py.
           LLM_API_KEY: ${{ secrets.LLM_API_KEY || 'dummy-for-mocked-tests' }}
-          LLM_MODEL: openrouter/free
           QDRANT_URL: http://localhost:6333
         run: pytest -v
 

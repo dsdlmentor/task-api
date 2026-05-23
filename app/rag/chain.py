@@ -1,15 +1,9 @@
 """RAG chain assembly.
 
-Embedding model: intfloat/multilingual-e5-small (118 MB, 384-dim).
-Multilingual coverage means the system answers questions in English or
-Russian over the English scikit-learn documentation corpus.
-
-If you don't need Russian and want a slightly faster purely-English
-embedder, swap EMBEDDING_MODEL to "sentence-transformers/all-MiniLM-L6-v2"
-(same 384-dim, no re-indexing needed).
+Embedding model and all retriever knobs come from app.config — no
+magic strings here. To switch the embedder, change ONE line in
+app/config.py and reindex (see app/scripts/index_corpus.py).
 """
-
-import os
 
 from langchain_core.documents import Document
 from langchain_core.output_parsers import StrOutputParser
@@ -19,11 +13,8 @@ from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_qdrant import QdrantVectorStore
 from qdrant_client import QdrantClient
 
+from app.config import settings
 from app.llm import get_llm
-
-COLLECTION_NAME = "sklearn_docs"
-EMBEDDING_MODEL = "intfloat/multilingual-e5-small"  # 384-dim, multilingual
-TOP_K = 4
 
 SYSTEM_PROMPT = """You are a study assistant for the Classic ML cycle of an ML/DS course.
 The context below is taken from the official scikit-learn documentation and from
@@ -47,21 +38,19 @@ Answer (with citations):"""
 
 
 def get_vectorstore() -> QdrantVectorStore:
-    """Connect to the running Qdrant and the indexed collection."""
-    client = QdrantClient(url=os.environ["QDRANT_URL"])
+    client = QdrantClient(url=settings.qdrant_url)
     embeddings = HuggingFaceEmbeddings(
-        model_name=EMBEDDING_MODEL,
-        encode_kwargs={"normalize_embeddings": True},
+        model_name=settings.embedding_model,
+        encode_kwargs={"normalize_embeddings": settings.normalize_embeddings},
     )
     return QdrantVectorStore(
         client=client,
-        collection_name=COLLECTION_NAME,
+        collection_name=settings.collection_name,
         embedding=embeddings,
     )
 
 
 def format_docs_with_sources(docs: list[Document]) -> str:
-    """Render top-k chunks as a numbered context block for the LLM prompt."""
     lines = []
     for i, doc in enumerate(docs, 1):
         source = doc.metadata.get("source", "unknown")
@@ -70,9 +59,8 @@ def format_docs_with_sources(docs: list[Document]) -> str:
 
 
 def build_rag_chain():
-    """Assemble the LCEL pipeline: retriever -> prompt -> LLM -> parser."""
     vectorstore = get_vectorstore()
-    retriever = vectorstore.as_retriever(search_kwargs={"k": TOP_K})
+    retriever = vectorstore.as_retriever(search_kwargs={"k": settings.top_k})
     llm = get_llm()
     prompt = ChatPromptTemplate.from_template(SYSTEM_PROMPT)
 
