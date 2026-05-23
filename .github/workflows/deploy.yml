@@ -43,8 +43,8 @@ jobs:
             # Ensure mentoring-net exists (idempotent)
             docker network create mentoring-net 2>/dev/null || true
 
-            # Ensure qdrant_data + rag-service host dirs exist
-            mkdir -p /opt/qdrant_data /opt/rag-service/data
+            # Ensure qdrant_data host dir exists
+            mkdir -p /opt/qdrant_data /opt/rag-service
 
             # Write .env from secrets on every deploy
             cat > /opt/rag-service/.env <<EOF
@@ -57,7 +57,10 @@ jobs:
 
             docker pull ${{ env.IMAGE }}:latest
 
-            # Replace the running container atomically
+            # Replace the running container atomically.
+            # No volume for /app/data — about.md is baked into the image,
+            # corpus_chunks.jsonl is regenerated on each reindex inside
+            # the container. Vector data lives only in the qdrant volume.
             docker rm -f rag-app 2>/dev/null || true
             docker run -d \
               --name rag-app \
@@ -65,7 +68,6 @@ jobs:
               --restart unless-stopped \
               -p 127.0.0.1:8000:8000 \
               --env-file /opt/rag-service/.env \
-              -v /opt/rag-service/data:/app/data \
               ${{ env.IMAGE }}:latest
 
             # Wait until /health responds. Cold-start can take 60-90s
