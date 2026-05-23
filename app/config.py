@@ -32,12 +32,19 @@ class Settings(BaseSettings):
     # OpenAI-compatible endpoint. Switching providers is a one-line change.
     llm_base_url: str = "https://openrouter.ai/api/v1"
 
-    # Default pinned model: Qwen 2.5 72B Instruct via OpenRouter free tier.
-    # This model reliably follows the "reply in the same language as the
-    # user" system-prompt instruction — auto-routers (openrouter/free) do
-    # NOT, because they may dispatch to any underlying provider.
-    # See content.md "Стабильность языка ответов" for the production pattern.
-    llm_model: str = "qwen/qwen-2.5-72b-instruct:free"
+    # Default pinned model: DeepSeek v4 Flash via OpenRouter free tier.
+    # Pinned (not auto-routed) because it reliably follows the "reply in
+    # the same language as the user" system-prompt instruction. The
+    # openrouter/free auto-router can dispatch to ANY underlying provider,
+    # including small English-centric models that ignore the language rule.
+    # See content.md "Стабильность языка ответов" for the production
+    # pattern (multi-provider fallback chain + per-language eval).
+    #
+    # Verified-available alternatives on OpenRouter free tier:
+    #   - meta-llama/llama-3.3-70b-instruct:free  (reliable baseline)
+    #   - qwen/qwen3-next-80b-a3b-instruct:free   (best multilingual)
+    #   - deepseek/deepseek-v4-flash:free         (fast, strong Russian)
+    llm_model: str = "deepseek/deepseek-v4-flash:free"
 
     # 0 = deterministic. Bump to 0.2-0.3 only if you want variety in answers.
     llm_temperature: float = 0.0
