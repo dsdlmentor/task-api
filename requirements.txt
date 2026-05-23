@@ -1,3 +1,8 @@
+# Pull torch from the CPU-only PyPI mirror — otherwise sentence-transformers
+# pulls full CUDA wheels (~2 GB total: torch + cuDNN + NCCL), which both
+# blows up the image and breaks pip on the VPS via "no space left on device".
+--extra-index-url https://download.pytorch.org/whl/cpu
+
 fastapi>=0.110
 uvicorn[standard]>=0.27
 pydantic>=2.6
