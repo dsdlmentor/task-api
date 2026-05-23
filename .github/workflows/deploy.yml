@@ -68,16 +68,18 @@ jobs:
               -v /opt/rag-service/data:/app/data \
               ${{ env.IMAGE }}:latest
 
-            # Wait until /health responds before declaring success
-            for i in 1 2 3 4 5 6 7 8 9 10; do
+            # Wait until /health responds. Cold-start can take 60-90s
+            # because lifespan downloads the multilingual-e5-small model
+            # (~118 MB) from HuggingFace Hub on the first run.
+            for i in $(seq 1 40); do
               if curl -sf http://127.0.0.1:8000/health > /dev/null; then
-                echo "Service healthy"
+                echo "Service healthy after ${i} checks"
                 exit 0
               fi
-              echo "Waiting for /health... ($i/10)"
-              sleep 3
+              echo "Waiting for /health... ($i/40)"
+              sleep 5
             done
 
-            echo "Service failed to become healthy"
-            docker logs --tail 50 rag-app
+            echo "Service failed to become healthy after 200s"
+            docker logs --tail 80 rag-app
             exit 1
