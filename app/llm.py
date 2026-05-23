@@ -1,18 +1,20 @@
-import os
+"""LLM client factory.
+
+Wraps any OpenAI-compatible provider (OpenRouter, Groq, Mistral,
+Cerebras, DeepSeek, ...). All parameters come from app.config so
+that swapping providers is a one-line edit in config.py — no env
+juggling, no secrets reshuffle.
+"""
 
 from langchain_openai import ChatOpenAI
 
+from app.config import settings
+
 
 def get_llm() -> ChatOpenAI:
-    """Return a configured ChatOpenAI client.
-
-    Reads LLM_BASE_URL, LLM_API_KEY, LLM_MODEL from environment.
-    Works with any OpenAI-compatible provider: OpenRouter, Groq,
-    Mistral, Cerebras, DeepSeek.
-    """
     return ChatOpenAI(
-        base_url=os.environ["LLM_BASE_URL"],
-        api_key=os.environ["LLM_API_KEY"],
-        model=os.environ["LLM_MODEL"],
-        temperature=0,
+        base_url=settings.llm_base_url,
+        api_key=settings.llm_api_key,
+        model=settings.llm_model,
+        temperature=settings.llm_temperature,
     )

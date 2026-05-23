@@ -1,7 +1,11 @@
-"""Build/refresh the Qdrant collection from data/corpus_chunks.jsonl."""
+"""Build/refresh the Qdrant collection from data/corpus_chunks.jsonl.
+
+All knobs (embedding model, dim, collection name, qdrant URL) come from
+app.config — keep this script and chain.py reading from the same source
+of truth, otherwise retrieval silently breaks.
+"""
 
 import json
-import os
 from pathlib import Path
 
 from langchain_core.documents import Document
@@ -10,10 +14,9 @@ from langchain_qdrant import QdrantVectorStore
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams
 
+from app.config import settings
+
 CHUNKS_PATH = Path("data/corpus_chunks.jsonl")
-COLLECTION_NAME = "sklearn_docs"
-EMBEDDING_MODEL = "intfloat/multilingual-e5-small"  # must match app/rag/chain.py
-EMBEDDING_DIM = 384
 
 
 def load_chunks(path: Path) -> list[Document]:
@@ -27,24 +30,23 @@ def load_chunks(path: Path) -> list[Document]:
 
 
 def main() -> None:
-    qdrant_url = os.environ["QDRANT_URL"]
-    client = QdrantClient(url=qdrant_url)
+    client = QdrantClient(url=settings.qdrant_url)
 
-    if client.collection_exists(COLLECTION_NAME):
-        client.delete_collection(COLLECTION_NAME)
+    if client.collection_exists(settings.collection_name):
+        client.delete_collection(settings.collection_name)
     client.create_collection(
-        collection_name=COLLECTION_NAME,
-        vectors_config=VectorParams(size=EMBEDDING_DIM, distance=Distance.COSINE),
+        collection_name=settings.collection_name,
+        vectors_config=VectorParams(size=settings.embedding_dim, distance=Distance.COSINE),
     )
-    print(f"Collection {COLLECTION_NAME} (re)created at {qdrant_url}")
+    print(f"Collection {settings.collection_name} (re)created at {settings.qdrant_url}")
 
     embeddings = HuggingFaceEmbeddings(
-        model_name=EMBEDDING_MODEL,
-        encode_kwargs={"normalize_embeddings": True},
+        model_name=settings.embedding_model,
+        encode_kwargs={"normalize_embeddings": settings.normalize_embeddings},
     )
     vectorstore = QdrantVectorStore(
         client=client,
-        collection_name=COLLECTION_NAME,
+        collection_name=settings.collection_name,
         embedding=embeddings,
     )
 

@@ -46,11 +46,12 @@ jobs:
             # Ensure qdrant_data host dir exists
             mkdir -p /opt/qdrant_data /opt/rag-service
 
-            # Write .env from secrets on every deploy
+            # Write .env from secrets on every deploy.
+            # Only true secrets live here. Model name, base URL, qdrant
+            # URL, top_k, embedding model — all default in app/config.py
+            # and are overridable via env if you ever need to.
             cat > /opt/rag-service/.env <<EOF
-            LLM_BASE_URL=${{ secrets.LLM_BASE_URL }}
             LLM_API_KEY=${{ secrets.LLM_API_KEY }}
-            LLM_MODEL=${{ secrets.LLM_MODEL }}
             QDRANT_URL=http://qdrant:6333
             EOF
             chmod 600 /opt/rag-service/.env
