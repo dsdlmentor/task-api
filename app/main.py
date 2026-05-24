@@ -103,31 +103,76 @@ def _format_sources(docs: list) -> str:
     return "\n".join(lines)
 
 
-def respond(message: str, history: list) -> tuple[list, str, str, str]:
-    """Gradio handler. Returns updated history, cleared textbox, timings, sources."""
+def respond(message: str, history: list):
+    """Streaming Gradio handler.
+
+    Yields partial chatbot state on every LLM token chunk so the user
+    sees the answer appear word-by-word instead of waiting for the
+    full response. Time-to-first-token (TTFT) is reported separately
+    in the timings panel — typically <1s vs ~7s for the full reply.
+    """
     if not message or not message.strip():
-        return history, "", "### ⏱ Тайминги\n\n_Пустой запрос_", "### 📚 Источники\n\n_—_"
+        yield history, "", "### ⏱ Тайминги\n\n_Пустой запрос_", "### 📚 Источники\n\n_—_"
+        return
 
     history = history + [{"role": "user", "content": message}]
 
     t0 = time.perf_counter()
     docs = _retriever.invoke(message)
     retrieval_ms = (time.perf_counter() - t0) * 1000
+    sources_panel = _format_sources(docs)
+
+    # Yield #1: sources panel filled immediately, LLM "streaming..." placeholder.
+    # User sees what's been retrieved before waiting for LLM to start writing.
+    history.append({"role": "assistant", "content": ""})
+    yield (
+        history, "",
+        "### ⏱ Тайминги\n\n"
+        f"- 🔍 **Retrieval:** {retrieval_ms:.0f} ms\n"
+        "- 🤖 **LLM:** _streaming…_",
+        sources_panel,
+    )
 
     t1 = time.perf_counter()
+    ttft_ms: float | None = None
+    accumulated = ""
     try:
-        answer = _chain.invoke(message)
-        llm_ms = (time.perf_counter() - t1) * 1000
-        history.append({"role": "assistant", "content": answer})
-        return history, "", _format_timings(retrieval_ms, llm_ms, None), _format_sources(docs)
-    except Exception as exc:
-        msg = (
-            f"⚠️ LLM-провайдер сейчас недоступен ({type(exc).__name__}). "
-            f"На бесплатном тарифе OpenRouter это бывает — upstream-провайдер "
-            f"ушёл в rate-limit. Попробуй через 30-60 секунд."
+        for chunk in _chain.stream(message):
+            if not chunk:
+                continue
+            if ttft_ms is None:
+                ttft_ms = (time.perf_counter() - t1) * 1000
+            accumulated += chunk
+            history[-1]["content"] = accumulated
+            yield (
+                history, "",
+                "### ⏱ Тайминги\n\n"
+                f"- 🔍 **Retrieval:** {retrieval_ms:.0f} ms\n"
+                f"- ⚡ **TTFT (1st token):** {ttft_ms:.0f} ms\n"
+                f"- 🤖 **LLM:** _streaming… {len(accumulated)} chars_",
+                sources_panel,
+            )
+
+        llm_total_ms = (time.perf_counter() - t1) * 1000
+        yield (
+            history, "",
+            "### ⏱ Тайминги последнего запроса\n\n"
+            f"- 🔍 **Retrieval (embed + Qdrant):** {retrieval_ms:.0f} ms\n"
+            f"- ⚡ **TTFT (time to first token):** {ttft_ms:.0f} ms\n"
+            f"- 🤖 **LLM stream (full):** {llm_total_ms:.0f} ms\n"
+            f"- 📊 **Total:** {retrieval_ms + llm_total_ms:.0f} ms",
+            sources_panel,
         )
-        history.append({"role": "assistant", "content": msg})
-        return history, "", _format_timings(retrieval_ms, None, type(exc).__name__), _format_sources(docs)
+    except Exception as exc:
+        history[-1]["content"] = (
+            f"⚠️ LLM-провайдер сейчас недоступен ({type(exc).__name__}). "
+            f"Попробуй через 30-60 секунд."
+        )
+        yield (
+            history, "",
+            _format_timings(retrieval_ms, None, type(exc).__name__),
+            sources_panel,
+        )
 
 
 CSS = """
