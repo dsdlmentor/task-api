@@ -266,7 +266,14 @@ def respond(message: str, history: list):
 
 
 def respond_agent(message: str, history: list, thread_id_state: str):
-    """W17 /agent handler — full graph run with trace formatting."""
+    """W17 /agent handler — streaming via graph.stream().
+
+    Uses per-request local accumulators for trace + sources so that the
+    MemorySaver checkpoint (shared across thread_id requests) does not
+    leak old tool calls into the panel. Yields progress updates after
+    each node fires so the user sees status changes instead of a 15-30s
+    blank wait.
+    """
     if not message or not message.strip():
         yield history, "", "_Пустой запрос_", "_—_", "_—_", thread_id_state
         return
@@ -283,51 +290,149 @@ def respond_agent(message: str, history: list, thread_id_state: str):
 
     history = history + [{"role": "user", "content": message}]
     thread_id = thread_id_state or str(uuid.uuid4())
-
     t0 = time.perf_counter()
+
+    # Per-request accumulators — reset on every query so trace doesn't
+    # leak between calls that share a thread_id.
+    trace_steps: list[TraceStep] = []
+    tools_used: list[str] = []
+    sources: list[AgentSource] = []
+    step_counter = 0
+    iteration_count = 0
+
+    # Status messages shown in the chat bubble while each tool is running.
+    TOOL_STATUS = {
+        "documentation_search": "📚 Ищу в документации scikit-learn…",
+        "python_repl": "🧮 Считаю в Python REPL…",
+        "web_search": "🌐 Ищу в интернете через DuckDuckGo…",
+    }
+
+    def render_trace() -> str:
+        if not trace_steps:
+            return "_Шаги появятся здесь по мере выполнения…_"
+        lines = ["### Шаги агента", ""]
+        for s in trace_steps:
+            preview = s.output[:120] + ("…" if len(s.output) > 120 else "")
+            lines.append(
+                f"**{s.step}.** `{s.node}` → tool `{s.tool}` · args `{s.input}` · output `{preview}`"
+            )
+        return "\n\n".join(lines)
+
+    def render_sources() -> str:
+        if not sources:
+            return "### 📚 Источники\n\n_—_"
+        lines = ["### 📚 Источники", ""]
+        for i, s in enumerate(sources, 1):
+            lines.append(f"**[{i}]** `{s.url}`")
+        return "\n".join(lines)
+
+    def render_timings(final: bool = False) -> str:
+        elapsed = int((time.perf_counter() - t0) * 1000)
+        label = "Total" if final else "Прошло"
+        return (
+            "### ⏱ Тайминги\n\n"
+            f"- 🤖 **{label}:** {elapsed} ms\n"
+            f"- 🔄 **Итераций:** {iteration_count}\n"
+            f"- 🛠 **Tool-вызовов:** {len(trace_steps)}"
+        )
+
+    # Initial placeholder: chat bubble + reset side panels.
+    history.append({"role": "assistant", "content": "🤔 Думаю…"})
+    yield (
+        history, "",
+        render_timings(),
+        render_sources(),
+        render_trace(),
+        thread_id,
+    )
+
     try:
-        result = _agent_graph.invoke(
+        for chunk in _agent_graph.stream(
             {"messages": [HumanMessage(content=message)], "iteration_count": 0},
             config={"configurable": {"thread_id": thread_id}, "recursion_limit": 30},
-        )
+        ):
+            for node_name, node_state in chunk.items():
+                new_messages = node_state.get("messages", []) if isinstance(node_state, dict) else []
+                if node_name == "agent":
+                    iteration_count = node_state.get("iteration_count", iteration_count)
+                    for m in new_messages:
+                        if not isinstance(m, AIMessage):
+                            continue
+                        tool_calls = getattr(m, "tool_calls", None) or []
+                        if tool_calls:
+                            for tc in tool_calls:
+                                step_counter += 1
+                                tname = tc["name"]
+                                tools_used.append(tname)
+                                trace_steps.append(
+                                    TraceStep(
+                                        step=step_counter,
+                                        node="agent",
+                                        tool=tname,
+                                        input=tc.get("args", {}),
+                                        output="(в процессе)",
+                                        latency_ms=0,
+                                    )
+                                )
+                                history[-1]["content"] = TOOL_STATUS.get(
+                                    tname, f"⚙️ Вызываю tool `{tname}`…"
+                                )
+                                yield (
+                                    history, "",
+                                    render_timings(),
+                                    render_sources(),
+                                    render_trace(),
+                                    thread_id,
+                                )
+                        else:
+                            # Final assistant answer (no more tool_calls).
+                            raw_answer = m.content
+                            safe_answer, _ = check_output(raw_answer, tools_used)
+                            history[-1]["content"] = safe_answer
+                            yield (
+                                history, "",
+                                render_timings(final=True),
+                                render_sources(),
+                                render_trace(),
+                                thread_id,
+                            )
+                elif node_name == "tool_executor":
+                    for m in new_messages:
+                        if not isinstance(m, ToolMessage):
+                            continue
+                        content = str(m.content) if m.content is not None else ""
+                        # Fill the most-recent in-progress step's output.
+                        for s in reversed(trace_steps):
+                            if s.output == "(в процессе)":
+                                s.output = content[:500]
+                                break
+                        # Extract sources block emitted by documentation_search.
+                        if "Sources:" in content:
+                            tail = content.split("Sources:", 1)[1]
+                            for line in tail.strip().splitlines():
+                                url = line.strip().lstrip("- ").strip()
+                                if url and not any(s.url == url for s in sources):
+                                    sources.append(AgentSource(url=url, snippet=""))
+                        history[-1]["content"] = "🔍 Анализирую полученные данные…"
+                        yield (
+                            history, "",
+                            render_timings(),
+                            render_sources(),
+                            render_trace(),
+                            thread_id,
+                        )
     except Exception as exc:
-        history.append({
-            "role": "assistant",
-            "content": f"⚠️ Agent error: {type(exc).__name__}: {exc}",
-        })
-        yield history, "", "_Agent error_", "_—_", "_—_", thread_id
-        return
-    total_ms = int((time.perf_counter() - t0) * 1000)
-
-    raw_answer = result["messages"][-1].content
-    trace_steps, tools_used = _extract_trace(result["messages"])
-    safe_answer, _ = check_output(raw_answer, tools_used)
-    sources = _extract_sources_from_trace(result["messages"])
-
-    history.append({"role": "assistant", "content": safe_answer})
-
-    trace_md_lines = ["### Шаги агента", ""]
-    for s in trace_steps:
-        out_preview = s.output[:120] + ("…" if len(s.output) > 120 else "")
-        trace_md_lines.append(
-            f"**{s.step}.** `{s.node}` → tool `{s.tool}` · args `{s.input}` · output `{out_preview}`"
+        history[-1]["content"] = (
+            f"⚠️ Agent error: {type(exc).__name__}: {exc}"
         )
-    trace_md = "\n\n".join(trace_md_lines) if trace_steps else "_Без tool-вызовов_"
-
-    timings = (
-        "### ⏱ Тайминги\n\n"
-        f"- 🤖 **Total:** {total_ms} ms\n"
-        f"- 🔄 **Итераций:** {result['iteration_count']}"
-    )
-    if sources:
-        src_lines = ["### 📚 Источники", ""]
-        for i, s in enumerate(sources, 1):
-            src_lines.append(f"**[{i}]** `{s.url}`")
-        sources_panel = "\n".join(src_lines)
-    else:
-        sources_panel = "### 📚 Источники\n\n_—_"
-
-    yield history, "", timings, sources_panel, trace_md, thread_id
+        yield (
+            history, "",
+            render_timings(final=True),
+            render_sources(),
+            render_trace(),
+            thread_id,
+        )
+        return
 
 
 def _route_respond(message, history, mode, thread_id_state):
