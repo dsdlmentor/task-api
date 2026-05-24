@@ -40,16 +40,21 @@ class Settings(BaseSettings):
     # See content.md "Стабильность языка ответов" for the production
     # pattern (multi-provider fallback chain + per-language eval).
     #
-    # Verified-available alternatives on OpenRouter free tier:
-    #   - meta-llama/llama-3.3-70b-instruct:free  (CURRENT — reliable, holds Russian)
-    #   - qwen/qwen3-next-80b-a3b-instruct:free   (best multilingual, but quota-shared with llama)
-    #   - deepseek/deepseek-v4-flash:free         (fast, but Crucible upstream often out of credits)
+    # Default pinned model: meta-llama/llama-3.3-70b-instruct (PAID).
+    # ~$0.07 per 1000 typical chat turns. We use the paid variant because
+    # OpenRouter :free models are aggressively rate-limited (20 req/min,
+    # 50 req/day on $0-credit accounts) AND share quota with other users
+    # of the same upstream provider — leading to unpredictable 429s.
     #
-    # Why not deepseek-v4-flash:free as default: its underlying provider
-    # (Crucible) regularly returns 402 "out of credits" on the free tier
-    # even when the OpenRouter daily quota is fresh. llama-3.3-70b is
-    # hosted by multiple providers — more resilient.
-    llm_model: str = "meta-llama/llama-3.3-70b-instruct:free"
+    # For a fully free setup, swap to "meta-llama/llama-3.3-70b-instruct:free"
+    # and accept occasional rate-limit pauses. For a learning project this
+    # is fine; the chain.py system prompt and the LLM_API_KEY contract
+    # don't change.
+    #
+    # Production-grade alternative: multi-provider fallback chain (Groq,
+    # Cerebras, OpenAI, Anthropic) wrapped around get_llm(). Documented
+    # in content.md "Стабильность языка ответов".
+    llm_model: str = "meta-llama/llama-3.3-70b-instruct"
 
     # 0 = deterministic. Bump to 0.2-0.3 only if you want variety in answers.
     llm_temperature: float = 0.0
