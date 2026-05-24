@@ -358,13 +358,63 @@ def respond_agent(message: str, history: list, thread_id_state: str):
         "🤔 LLM решает, какой инструмент вызвать…",
     )
 
+    # Streaming bookkeeping:
+    # - We use stream_mode=["updates", "messages"] to get BOTH per-node updates
+    #   (for status changes when tools start/finish) AND per-token chunks from
+    #   the LLM (for W16-style streaming of the final natural-language answer).
+    # - `streaming_buffer` collects tokens from the most-recent agent_node LLM
+    #   call. If that call ends with tool_calls, we discard the buffer (it was
+    #   the tool-arg JSON anyway). If it ends with no tool_calls, the buffer IS
+    #   the final answer and we keep it in the chat bubble.
+    streaming_buffer = ""
+    awaiting_first_chunk = True
+    current_status_line = "🤔 LLM решает, какой инструмент вызвать…"
+
     try:
-        for chunk in _agent_graph.stream(
+        for event in _agent_graph.stream(
             {"messages": [HumanMessage(content=message)], "iteration_count": 0},
             config={"configurable": {"thread_id": thread_id}, "recursion_limit": 30},
+            stream_mode=["updates", "messages"],
         ):
-            for node_name, node_state in chunk.items():
+            if not isinstance(event, tuple) or len(event) != 2:
+                continue
+            mode_name, payload = event
+
+            # --- token stream from any node's LLM call -----------------------
+            if mode_name == "messages":
+                if not isinstance(payload, tuple) or len(payload) != 2:
+                    continue
+                msg_chunk, meta = payload
+                # Only stream chunks from the agent node (LLM thinking / final
+                # answer). Tool node also produces messages but their content
+                # arrives whole, not token-by-token.
+                if meta.get("langgraph_node") != "agent":
+                    continue
+                chunk_text = getattr(msg_chunk, "content", "") or ""
+                if not chunk_text:
+                    continue
+                if awaiting_first_chunk:
+                    awaiting_first_chunk = False
+                    current_status_line = "✍️ LLM пишет ответ потоком…"
+                streaming_buffer += chunk_text
+                history[-1]["content"] = streaming_buffer
+                yield (
+                    list(history), "",
+                    render_timings(),
+                    render_sources(),
+                    render_trace(),
+                    thread_id,
+                    current_status_line,
+                )
+                continue
+
+            # --- node finished: handle full state update --------------------
+            if mode_name != "updates" or not isinstance(payload, dict):
+                continue
+
+            for node_name, node_state in payload.items():
                 new_messages = node_state.get("messages", []) if isinstance(node_state, dict) else []
+
                 if node_name == "agent":
                     iteration_count = node_state.get("iteration_count", iteration_count)
                     for m in new_messages:
@@ -372,6 +422,10 @@ def respond_agent(message: str, history: list, thread_id_state: str):
                             continue
                         tool_calls = getattr(m, "tool_calls", None) or []
                         if tool_calls:
+                            # The tokens we streamed were the tool-call arguments,
+                            # NOT a user-visible answer. Replace the bubble with
+                            # tool status and reset streaming buffer for the next
+                            # LLM call.
                             for tc in tool_calls:
                                 step_counter += 1
                                 tname = tc["name"]
@@ -390,6 +444,7 @@ def respond_agent(message: str, history: list, thread_id_state: str):
                                     tname, f"⚙️ Вызываю tool `{tname}`…"
                                 )
                                 history[-1]["content"] = status_line
+                                current_status_line = status_line
                                 args_preview = str(tc.get("args", {}))[:80]
                                 yield (
                                     list(history), "",
@@ -399,9 +454,13 @@ def respond_agent(message: str, history: list, thread_id_state: str):
                                     thread_id,
                                     f"{status_line}  ·  `{args_preview}`",
                                 )
+                            streaming_buffer = ""
+                            awaiting_first_chunk = True
                         else:
-                            # Final assistant answer (no more tool_calls).
-                            raw_answer = m.content
+                            # Final answer. The streaming buffer should already
+                            # contain it; double-check against the canonical
+                            # message in case streaming missed any chunks.
+                            raw_answer = m.content or streaming_buffer
                             safe_answer, _ = check_output(raw_answer, tools_used)
                             history[-1]["content"] = safe_answer
                             elapsed_s = (time.perf_counter() - t0)
@@ -413,19 +472,18 @@ def respond_agent(message: str, history: list, thread_id_state: str):
                                 thread_id,
                                 f"✅ Готово за {elapsed_s:.1f} сек · {len(trace_steps)} tool-вызовов · {iteration_count} итераций",
                             )
+
                 elif node_name == "tool_executor":
                     for m in new_messages:
                         if not isinstance(m, ToolMessage):
                             continue
                         content = str(m.content) if m.content is not None else ""
-                        # Fill the most-recent in-progress step's output.
                         last_tool = None
                         for s in reversed(trace_steps):
                             if s.output == "(в процессе)":
                                 s.output = content[:500]
                                 last_tool = s.tool
                                 break
-                        # Extract sources block emitted by documentation_search.
                         if "Sources:" in content:
                             tail = content.split("Sources:", 1)[1]
                             for line in tail.strip().splitlines():
@@ -433,6 +491,11 @@ def respond_agent(message: str, history: list, thread_id_state: str):
                                 if url and not any(src.url == url for src in sources):
                                     sources.append(AgentSource(url=url, snippet=""))
                         history[-1]["content"] = "🔍 Анализирую полученные данные…"
+                        current_status_line = "🔍 Анализирую полученные данные…"
+                        # Reset streaming buffer — next agent_node LLM call will
+                        # start fresh.
+                        streaming_buffer = ""
+                        awaiting_first_chunk = True
                         yield (
                             list(history), "",
                             render_timings(),
