@@ -458,9 +458,9 @@ with gr.Blocks(
 ) as demo:
     gr.Markdown(
         "# 📖 scikit-learn docs RAG + Agent\n"
-        "_Быстрый режим — чистый RAG по документации scikit-learn (~3 сек). "
-        "Режим «Агент» — LangGraph с тремя tools: поиск в документации, Python REPL для вычислений, "
-        "и web search через DuckDuckGo для свежих данных (~10–30 сек, открой блок «Что сделал агент» справа)._"
+        "**Быстрый режим** — чистый RAG по документации scikit-learn, ответ за 2–7 секунд. "
+        "**Режим «Агент»** — LangGraph с тремя tools (поиск в документации, Python REPL для вычислений, "
+        "веб-поиск через DuckDuckGo), ответ за 10–30 секунд, шаги видны справа в блоке «Что сделал агент»."
     )
     with gr.Row():
         with gr.Column(scale=3):
