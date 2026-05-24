@@ -12,7 +12,9 @@ _PROMPT_INJECTION_PATTERNS = [
 ]
 _COMPILED = [re.compile(p, re.IGNORECASE) for p in _PROMPT_INJECTION_PATTERNS]
 
-_ALLOWED_CHARS = re.compile(r"^[A-Za-zА-Яа-я0-9\s.,?!()\-—:;'\"$%/+=\[\]]+$")
+_ALLOWED_CHARS = re.compile(
+    r"^[A-Za-zА-Яа-я0-9\s.,?!()\-—:;'\"$%/+=\[\]*^<>_&|@#~]+$"
+)
 
 _DECLARATIVE_MARKERS = (
     "according to",
