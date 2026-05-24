@@ -29,6 +29,13 @@ def test_input_guardrails_accept_russian():
     check_input("Как настроить alpha в Ridge?")
 
 
+def test_input_guardrails_accept_math_symbols():
+    """Users ask agent to compute formulas — * < > ^ must pass."""
+    check_input("What is 0.5 * (1*1 + 2*2 + 3*3)?")
+    check_input("Compute x^2 + 2*x + 1 for x=3")
+    check_input("List items where x > 5 and y < 10")
+
+
 def test_output_guardrail_blocks_declarative_without_source():
     answer = "According to the documentation, Ridge uses L2 penalty."
     trace_tools = ["python_repl"]
