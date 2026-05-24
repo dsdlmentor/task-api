@@ -34,3 +34,13 @@ qdrant-client>=1.12.0
 ragas==0.2.15
 datasets>=3.0.0
 python-dotenv>=1.0.0
+
+# Agent (W17)
+langgraph>=0.2.0
+langchain-experimental>=0.3.0
+# langchain-community>=0.3.20 expects the rebranded `ddgs` package
+# (was `duckduckgo-search` ≤6.x). Pin both to keep older signatures
+# working too.
+ddgs>=6.0.0
+duckduckgo-search>=6.0.0
+structlog>=24.0.0

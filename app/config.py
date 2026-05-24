@@ -80,5 +80,19 @@ class Settings(BaseSettings):
     # e5 models REQUIRE L2 normalization for cosine distance to behave correctly.
     normalize_embeddings: bool = True
 
+    # --- Agent (W17) ---
+    # Hard cap on ReAct iterations to prevent infinite tool-call loops.
+    max_iterations: int = 5
+
+    # Deterministic tool selection by default. Bump only if you want
+    # variety in tool choice (rarely useful — tools should be deterministic).
+    agent_temperature: float = 0.0
+
+    # Disabled on CI (tests must not hit DuckDuckGo); enabled in production.
+    enable_web_search: bool = True
+
+    # Output guardrail: clip answers longer than this (LLM loop-safety).
+    agent_max_output_chars: int = 2000
+
 
 settings = Settings()
