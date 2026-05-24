@@ -1,32 +1,42 @@
 """FastAPI + Gradio entry point.
 
-Layout: Gradio Blocks with two columns under a single Row.
-- Left (scale=3): full-height chat with LaTeX rendering
-- Right (scale=1): timings panel + sources list, updated on every turn
+W16: /chat — RAG over sklearn docs, full-page Gradio with streaming.
+W17: /agent — LangGraph ReAct agent over the same retriever + 2 extra tools.
 
-Timings split the request into two measurable phases:
-- retrieval (query embed + Qdrant top-k)
-- LLM (OpenRouter call: prompt assembly is sub-millisecond, lumped in here)
-
-Students see WHERE the latency lives and can reason about caching,
-provider swap, or model size without guesswork.
+The Gradio UI gets a radio toggle "Быстрый (/chat)" ↔ "Агент (/agent)" and
+a collapsed Accordion "Что сделал агент" that shows step-by-step tool
+calls when the agent mode is active.
 """
 
 import time
+import uuid
 from contextlib import asynccontextmanager
 
 import gradio as gr
+import structlog
 from fastapi import FastAPI, HTTPException
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langgraph.checkpoint.memory import MemorySaver
 
+from app.agent.graph import build_agent_graph
+from app.agent.guardrails import GuardrailError, check_input, check_output
 from app.rag.chain import build_rag_chain
+from app.schemas.agent import AgentRequest, AgentResponse, Source as AgentSource, TraceStep
 from app.schemas.chat import ChatRequest, ChatResponse, Source
+
+structlog.configure(
+    processors=[
+        structlog.processors.add_log_level,
+        structlog.processors.TimeStamper(fmt="iso"),
+        structlog.processors.JSONRenderer(),
+    ],
+)
 
 _chain = None
 _retriever = None
+_agent_graph = None
+_agent_checkpointer = None
 
-# LaTeX delimiters for Gradio's Chatbot. LLM answers about Ridge, Lasso,
-# precision/recall use $$..$$ / \[..\] / $..$ regularly. Without this
-# block they render as raw `$\ell_1$`-strings.
 LATEX_DELIMITERS = [
     {"left": "$$", "right": "$$", "display": True},
     {"left": "\\[", "right": "\\]", "display": True},
@@ -37,12 +47,16 @@ LATEX_DELIMITERS = [
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _chain, _retriever
+    global _chain, _retriever, _agent_graph, _agent_checkpointer
     _chain, _retriever = build_rag_chain()
-    print("RAG chain ready")
+    _agent_checkpointer = MemorySaver()
+    _agent_graph = build_agent_graph(checkpointer=_agent_checkpointer)
+    print("RAG chain + agent graph ready")
     yield
     _chain = None
     _retriever = None
+    _agent_graph = None
+    _agent_checkpointer = None
 
 
 app = FastAPI(title="RAG service", lifespan=lifespan)
@@ -76,6 +90,82 @@ def chat(payload: ChatRequest) -> ChatResponse:
     return ChatResponse(answer=answer, sources=sources)
 
 
+def _extract_trace(messages: list) -> tuple[list[TraceStep], list[str]]:
+    steps: list[TraceStep] = []
+    tools_used: list[str] = []
+    step_num = 0
+    for msg in messages:
+        if isinstance(msg, AIMessage) and getattr(msg, "tool_calls", None):
+            for tc in msg.tool_calls:
+                step_num += 1
+                tools_used.append(tc["name"])
+                steps.append(
+                    TraceStep(
+                        step=step_num,
+                        node="agent",
+                        tool=tc["name"],
+                        input=tc.get("args", {}),
+                        output="(tool requested)",
+                        latency_ms=0,
+                    )
+                )
+        elif isinstance(msg, ToolMessage):
+            if steps and steps[-1].output == "(tool requested)":
+                content_str = str(msg.content) if msg.content is not None else ""
+                steps[-1].output = content_str[:500]
+    return steps, tools_used
+
+
+def _extract_sources_from_trace(messages: list) -> list[AgentSource]:
+    sources: list[AgentSource] = []
+    for msg in messages:
+        if isinstance(msg, ToolMessage) and "Sources:" in str(msg.content):
+            content = str(msg.content)
+            tail = content.split("Sources:", 1)[1]
+            for line in tail.strip().splitlines():
+                url = line.strip().lstrip("- ").strip()
+                if url:
+                    sources.append(AgentSource(url=url, snippet=""))
+    return sources
+
+
+@app.post("/agent", response_model=AgentResponse)
+def agent_chat(payload: AgentRequest) -> AgentResponse:
+    try:
+        check_input(payload.question)
+    except GuardrailError as e:
+        raise HTTPException(status_code=422, detail=f"Input rejected: {e}") from e
+
+    thread_id = payload.thread_id or str(uuid.uuid4())
+    t0 = time.perf_counter()
+    try:
+        result = _agent_graph.invoke(
+            {"messages": [HumanMessage(content=payload.question)], "iteration_count": 0},
+            config={"configurable": {"thread_id": thread_id}, "recursion_limit": 30},
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Agent unavailable: {type(exc).__name__}",
+        ) from exc
+    total_ms = int((time.perf_counter() - t0) * 1000)
+
+    raw_answer = result["messages"][-1].content
+    trace_steps, tools_used = _extract_trace(result["messages"])
+    if trace_steps:
+        trace_steps[-1].latency_ms = total_ms
+
+    safe_answer, guardrail_reason = check_output(raw_answer, tools_used)
+    sources = _extract_sources_from_trace(result["messages"])
+
+    return AgentResponse(
+        answer=safe_answer,
+        trace=trace_steps,
+        sources=sources,
+        guardrail_triggered=guardrail_reason,
+    )
+
+
 def _format_timings(retrieval_ms: float, llm_ms: float | None, llm_error: str | None) -> str:
     lines = [
         "### ⏱ Тайминги последнего запроса",
@@ -104,15 +194,9 @@ def _format_sources(docs: list) -> str:
 
 
 def respond(message: str, history: list):
-    """Streaming Gradio handler.
-
-    Yields partial chatbot state on every LLM token chunk so the user
-    sees the answer appear word-by-word instead of waiting for the
-    full response. Time-to-first-token (TTFT) is reported separately
-    in the timings panel — typically <1s vs ~7s for the full reply.
-    """
+    """W16 streaming /chat handler. Yields 6-tuple to match agent handler shape."""
     if not message or not message.strip():
-        yield history, "", "### ⏱ Тайминги\n\n_Пустой запрос_", "### 📚 Источники\n\n_—_"
+        yield history, "", "### ⏱ Тайминги\n\n_Пустой запрос_", "### 📚 Источники\n\n_—_", "_—_", ""
         return
 
     history = history + [{"role": "user", "content": message}]
@@ -122,8 +206,6 @@ def respond(message: str, history: list):
     retrieval_ms = (time.perf_counter() - t0) * 1000
     sources_panel = _format_sources(docs)
 
-    # Yield #1: sources panel filled immediately, LLM "streaming..." placeholder.
-    # User sees what's been retrieved before waiting for LLM to start writing.
     history.append({"role": "assistant", "content": ""})
     yield (
         history, "",
@@ -131,6 +213,8 @@ def respond(message: str, history: list):
         f"- 🔍 **Retrieval:** {retrieval_ms:.0f} ms\n"
         "- 🤖 **LLM:** _streaming…_",
         sources_panel,
+        "_(режим Быстрый — trace не используется)_",
+        "",
     )
 
     t1 = time.perf_counter()
@@ -151,6 +235,8 @@ def respond(message: str, history: list):
                 f"- ⚡ **TTFT (1st token):** {ttft_ms:.0f} ms\n"
                 f"- 🤖 **LLM:** _streaming… {len(accumulated)} chars_",
                 sources_panel,
+                "_(режим Быстрый — trace не используется)_",
+                "",
             )
 
         llm_total_ms = (time.perf_counter() - t1) * 1000
@@ -162,6 +248,8 @@ def respond(message: str, history: list):
             f"- 🤖 **LLM stream (full):** {llm_total_ms:.0f} ms\n"
             f"- 📊 **Total:** {retrieval_ms + llm_total_ms:.0f} ms",
             sources_panel,
+            "_(режим Быстрый — trace не используется)_",
+            "",
         )
     except Exception as exc:
         history[-1]["content"] = (
@@ -172,7 +260,82 @@ def respond(message: str, history: list):
             history, "",
             _format_timings(retrieval_ms, None, type(exc).__name__),
             sources_panel,
+            "_(режим Быстрый — trace не используется)_",
+            "",
         )
+
+
+def respond_agent(message: str, history: list, thread_id_state: str):
+    """W17 /agent handler — full graph run with trace formatting."""
+    if not message or not message.strip():
+        yield history, "", "_Пустой запрос_", "_—_", "_—_", thread_id_state
+        return
+
+    try:
+        check_input(message)
+    except GuardrailError as e:
+        history = history + [
+            {"role": "user", "content": message},
+            {"role": "assistant", "content": f"⚠️ Запрос отклонён guardrails: {e}"},
+        ]
+        yield history, "", "_Отклонён guardrails_", "_—_", "_—_", thread_id_state
+        return
+
+    history = history + [{"role": "user", "content": message}]
+    thread_id = thread_id_state or str(uuid.uuid4())
+
+    t0 = time.perf_counter()
+    try:
+        result = _agent_graph.invoke(
+            {"messages": [HumanMessage(content=message)], "iteration_count": 0},
+            config={"configurable": {"thread_id": thread_id}, "recursion_limit": 30},
+        )
+    except Exception as exc:
+        history.append({
+            "role": "assistant",
+            "content": f"⚠️ Agent error: {type(exc).__name__}: {exc}",
+        })
+        yield history, "", "_Agent error_", "_—_", "_—_", thread_id
+        return
+    total_ms = int((time.perf_counter() - t0) * 1000)
+
+    raw_answer = result["messages"][-1].content
+    trace_steps, tools_used = _extract_trace(result["messages"])
+    safe_answer, _ = check_output(raw_answer, tools_used)
+    sources = _extract_sources_from_trace(result["messages"])
+
+    history.append({"role": "assistant", "content": safe_answer})
+
+    trace_md_lines = ["### Шаги агента", ""]
+    for s in trace_steps:
+        out_preview = s.output[:120] + ("…" if len(s.output) > 120 else "")
+        trace_md_lines.append(
+            f"**{s.step}.** `{s.node}` → tool `{s.tool}` · args `{s.input}` · output `{out_preview}`"
+        )
+    trace_md = "\n\n".join(trace_md_lines) if trace_steps else "_Без tool-вызовов_"
+
+    timings = (
+        "### ⏱ Тайминги\n\n"
+        f"- 🤖 **Total:** {total_ms} ms\n"
+        f"- 🔄 **Итераций:** {result['iteration_count']}"
+    )
+    if sources:
+        src_lines = ["### 📚 Источники", ""]
+        for i, s in enumerate(sources, 1):
+            src_lines.append(f"**[{i}]** `{s.url}`")
+        sources_panel = "\n".join(src_lines)
+    else:
+        sources_panel = "### 📚 Источники\n\n_—_"
+
+    yield history, "", timings, sources_panel, trace_md, thread_id
+
+
+def _route_respond(message, history, mode, thread_id_state):
+    if mode == "Агент (/agent)":
+        yield from respond_agent(message, history, thread_id_state)
+    else:
+        for out in respond(message, history):
+            yield out[0], out[1], out[2], out[3], out[4], thread_id_state
 
 
 CSS = """
@@ -183,14 +346,15 @@ CSS = """
 """
 
 with gr.Blocks(
-    title="scikit-learn docs RAG",
+    title="scikit-learn docs RAG + Agent",
     css=CSS,
     fill_height=True,
     theme=gr.themes.Soft(),
 ) as demo:
     gr.Markdown(
-        "# 📖 scikit-learn docs RAG assistant\n"
-        "_Спрашивай про Linear models, Decision trees, Metrics — на русском или английском._"
+        "# 📖 scikit-learn docs RAG + Agent\n"
+        "_Спрашивай про Linear models, Decision trees, Metrics — на русском или английском. "
+        "В режиме «Агент» доступны Python REPL и web search._"
     )
     with gr.Row():
         with gr.Column(scale=3):
@@ -219,13 +383,30 @@ with gr.Blocks(
                 inputs=msg,
             )
         with gr.Column(scale=1, elem_id="side-panel"):
+            mode_radio = gr.Radio(
+                choices=["Быстрый (/chat)", "Агент (/agent)"],
+                value="Быстрый (/chat)",
+                label="Режим",
+            )
             timings_md = gr.Markdown(
                 "### ⏱ Тайминги последнего запроса\n\n_Задайте вопрос, чтобы увидеть тайминги._"
             )
             sources_md = gr.Markdown("### 📚 Источники\n\n_—_")
+            with gr.Accordion("Что сделал агент", open=False):
+                trace_md = gr.Markdown("_Включите режим «Агент», чтобы увидеть шаги._")
 
-    msg.submit(respond, [msg, chatbot], [chatbot, msg, timings_md, sources_md])
-    send.click(respond, [msg, chatbot], [chatbot, msg, timings_md, sources_md])
+    thread_id_state = gr.State("")
+
+    msg.submit(
+        _route_respond,
+        [msg, chatbot, mode_radio, thread_id_state],
+        [chatbot, msg, timings_md, sources_md, trace_md, thread_id_state],
+    )
+    send.click(
+        _route_respond,
+        [msg, chatbot, mode_radio, thread_id_state],
+        [chatbot, msg, timings_md, sources_md, trace_md, thread_id_state],
+    )
 
 
 app = gr.mount_gradio_app(app, demo, path="/")
