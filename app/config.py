@@ -41,10 +41,15 @@ class Settings(BaseSettings):
     # pattern (multi-provider fallback chain + per-language eval).
     #
     # Verified-available alternatives on OpenRouter free tier:
-    #   - meta-llama/llama-3.3-70b-instruct:free  (reliable baseline)
-    #   - qwen/qwen3-next-80b-a3b-instruct:free   (best multilingual)
-    #   - deepseek/deepseek-v4-flash:free         (fast, strong Russian)
-    llm_model: str = "deepseek/deepseek-v4-flash:free"
+    #   - meta-llama/llama-3.3-70b-instruct:free  (CURRENT — reliable, holds Russian)
+    #   - qwen/qwen3-next-80b-a3b-instruct:free   (best multilingual, but quota-shared with llama)
+    #   - deepseek/deepseek-v4-flash:free         (fast, but Crucible upstream often out of credits)
+    #
+    # Why not deepseek-v4-flash:free as default: its underlying provider
+    # (Crucible) regularly returns 402 "out of credits" on the free tier
+    # even when the OpenRouter daily quota is fresh. llama-3.3-70b is
+    # hosted by multiple providers — more resilient.
+    llm_model: str = "meta-llama/llama-3.3-70b-instruct:free"
 
     # 0 = deterministic. Bump to 0.2-0.3 only if you want variety in answers.
     llm_temperature: float = 0.0
