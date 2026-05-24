@@ -39,3 +39,16 @@ def test_chat_returns_answer_with_sources(mock_build) -> None:
     assert "Ridge uses L2" in body["answer"]
     assert len(body["sources"]) == 1
     assert "scikit-learn.org" in body["sources"][0]["url"]
+
+
+def test_health_response_has_no_xaccel_buffering_header() -> None:
+    with TestClient(app) as client:
+        response = client.get("/health")
+    assert response.headers.get("X-Accel-Buffering") is None
+
+
+def test_unknown_queue_path_gets_xaccel_buffering_no() -> None:
+    with TestClient(app) as client:
+        response = client.get("/gradio_api/queue/data?session_hash=test")
+    assert response.headers.get("X-Accel-Buffering") == "no"
+    assert response.headers.get("Cache-Control") == "no-cache"

@@ -14,9 +14,10 @@ from contextlib import asynccontextmanager
 
 import gradio as gr
 import structlog
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.checkpoint.memory import MemorySaver
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from app.agent.graph import build_agent_graph
 from app.agent.guardrails import GuardrailError, check_input, check_output
@@ -60,6 +61,29 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="RAG service", lifespan=lifespan)
+
+
+class DisableNginxBufferingMiddleware(BaseHTTPMiddleware):
+    """Tell nginx not to buffer Gradio's SSE queue stream.
+
+    Nginx buffers proxy responses by default. For Server-Sent Events that
+    means the browser only sees yields after the whole response closes —
+    no live status, no token streaming. The `X-Accel-Buffering: no` header
+    is the standard contract that asks nginx to forward bytes as they
+    arrive. Scoped to Gradio's queue paths to avoid disabling buffering
+    for static assets.
+    """
+
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+        path = request.url.path
+        if "/queue/data" in path or "/queue/join" in path:
+            response.headers["X-Accel-Buffering"] = "no"
+            response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
+app.add_middleware(DisableNginxBufferingMiddleware)
 
 
 @app.get("/health")
