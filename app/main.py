@@ -62,6 +62,49 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="RAG service", lifespan=lifespan)
 
 
+class DisableNginxBufferingMiddleware:
+    """Tell nginx not to buffer Gradio's SSE queue stream.
+
+    Nginx buffers proxy responses by default. For Server-Sent Events that
+    means the browser only sees yields after the whole response closes —
+    no live status, no token streaming. The `X-Accel-Buffering: no` header
+    is the standard contract that asks nginx to forward bytes as they
+    arrive. Scoped to Gradio's queue paths to avoid disabling buffering
+    for static assets.
+
+    Implemented as a raw ASGI middleware (not BaseHTTPMiddleware) because
+    BaseHTTPMiddleware cannot modify headers on streaming responses — by
+    the time it sees the response, headers are already on the wire. ASGI
+    middleware intercepts the `http.response.start` event before it ships.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        path = scope.get("path", "")
+        if "/queue/data" not in path and "/queue/join" not in path:
+            await self.app(scope, receive, send)
+            return
+
+        async def send_with_headers(message):
+            if message["type"] == "http.response.start":
+                headers = list(message.get("headers", []))
+                headers.append((b"x-accel-buffering", b"no"))
+                headers.append((b"cache-control", b"no-cache"))
+                message["headers"] = headers
+            await send(message)
+
+        await self.app(scope, receive, send_with_headers)
+
+
+app.add_middleware(DisableNginxBufferingMiddleware)
+
+
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
