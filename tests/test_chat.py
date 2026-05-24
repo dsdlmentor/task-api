@@ -41,14 +41,36 @@ def test_chat_returns_answer_with_sources(mock_build) -> None:
     assert "scikit-learn.org" in body["sources"][0]["url"]
 
 
-def test_health_response_has_no_xaccel_buffering_header() -> None:
-    with TestClient(app) as client:
-        response = client.get("/health")
-    assert response.headers.get("X-Accel-Buffering") is None
+def test_disable_nginx_buffering_middleware_on_queue_path() -> None:
+    from fastapi import FastAPI
 
+    from app.main import DisableNginxBufferingMiddleware
 
-def test_unknown_queue_path_gets_xaccel_buffering_no() -> None:
-    with TestClient(app) as client:
-        response = client.get("/gradio_api/queue/data?session_hash=test")
-    assert response.headers.get("X-Accel-Buffering") == "no"
-    assert response.headers.get("Cache-Control") == "no-cache"
+    test_app = FastAPI()
+    test_app.add_middleware(DisableNginxBufferingMiddleware)
+
+    @test_app.get("/queue/data")
+    def _queue():
+        return {"ok": True}
+
+    @test_app.get("/queue/join")
+    def _join():
+        return {"ok": True}
+
+    @test_app.get("/other")
+    def _other():
+        return {"ok": True}
+
+    with TestClient(test_app) as client:
+        queue_data = client.get("/queue/data")
+        queue_join = client.get("/queue/join")
+        other = client.get("/other")
+
+    assert queue_data.headers.get("x-accel-buffering") == "no"
+    assert queue_data.headers.get("cache-control") == "no-cache"
+
+    assert queue_join.headers.get("x-accel-buffering") == "no"
+    assert queue_join.headers.get("cache-control") == "no-cache"
+
+    assert other.headers.get("x-accel-buffering") is None
+    assert other.headers.get("cache-control") != "no-cache"

@@ -14,10 +14,9 @@ from contextlib import asynccontextmanager
 
 import gradio as gr
 import structlog
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.checkpoint.memory import MemorySaver
-from starlette.middleware.base import BaseHTTPMiddleware
 
 from app.agent.graph import build_agent_graph
 from app.agent.guardrails import GuardrailError, check_input, check_output
@@ -63,7 +62,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="RAG service", lifespan=lifespan)
 
 
-class DisableNginxBufferingMiddleware(BaseHTTPMiddleware):
+class DisableNginxBufferingMiddleware:
     """Tell nginx not to buffer Gradio's SSE queue stream.
 
     Nginx buffers proxy responses by default. For Server-Sent Events that
@@ -72,15 +71,35 @@ class DisableNginxBufferingMiddleware(BaseHTTPMiddleware):
     is the standard contract that asks nginx to forward bytes as they
     arrive. Scoped to Gradio's queue paths to avoid disabling buffering
     for static assets.
+
+    Implemented as a raw ASGI middleware (not BaseHTTPMiddleware) because
+    BaseHTTPMiddleware cannot modify headers on streaming responses — by
+    the time it sees the response, headers are already on the wire. ASGI
+    middleware intercepts the `http.response.start` event before it ships.
     """
 
-    async def dispatch(self, request: Request, call_next):
-        response = await call_next(request)
-        path = request.url.path
-        if "/queue/data" in path or "/queue/join" in path:
-            response.headers["X-Accel-Buffering"] = "no"
-            response.headers["Cache-Control"] = "no-cache"
-        return response
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        path = scope.get("path", "")
+        if "/queue/data" not in path and "/queue/join" not in path:
+            await self.app(scope, receive, send)
+            return
+
+        async def send_with_headers(message):
+            if message["type"] == "http.response.start":
+                headers = list(message.get("headers", []))
+                headers.append((b"x-accel-buffering", b"no"))
+                headers.append((b"cache-control", b"no-cache"))
+                message["headers"] = headers
+            await send(message)
+
+        await self.app(scope, receive, send_with_headers)
 
 
 app.add_middleware(DisableNginxBufferingMiddleware)
