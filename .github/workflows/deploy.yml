@@ -58,6 +58,16 @@ jobs:
 
             docker pull ${{ env.IMAGE }}:latest
 
+            # Reclaim disk: each deploy pulls a fresh ~3GB image (torch +
+            # sentence-transformers + langchain + langgraph). The previous
+            # SHA-tagged version becomes "dangling" after :latest moves —
+            # nothing frees it automatically. After ~10-15 deploys the
+            # 40GB VPS hits 100% and the next deploy fails with
+            # "cat: write error: No space left on device" on the .env write.
+            # -f drops only dangling (untagged) images; never touches
+            # running containers or their images.
+            docker image prune -f
+
             # Replace the running container atomically.
             # No volume for /app/data — about.md is baked into the image,
             # corpus_chunks.jsonl is regenerated on each reindex inside
