@@ -656,9 +656,9 @@ with gr.Blocks(
             gr.Examples(
                 label="🔗 Multi-hop: цепочка из двух tools (режим «Агент»)",
                 examples=[
-                    "What is the default n_estimators in RandomForestClassifier? Then compute n_estimators * 0.1 with python_repl",
-                    "Find max_depth default for RandomForest in the docs, then compute 2**10 — is it a reasonable depth?",
                     "What is the L2 penalty formula for Ridge? Calculate it for alpha=0.5 and w=[1, 2, 3]",
+                    "What is the default alpha in Ridge regression? Then compute alpha * 10 with python_repl",
+                    "What is the F1 formula? Calculate F1 for precision=0.8 and recall=0.6 with python_repl",
                 ],
                 inputs=msg,
             )
