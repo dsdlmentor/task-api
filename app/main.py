@@ -193,10 +193,16 @@ def _format_sources(docs: list) -> str:
     return "\n".join(lines)
 
 
+IDLE_STATUS = "💤 Готов к работе. Задай вопрос — здесь будут показываться шаги."
+
+
 def respond(message: str, history: list):
-    """W16 streaming /chat handler. Yields 6-tuple to match agent handler shape."""
+    """W16 streaming /chat handler. Yields 7-tuple to match agent handler shape.
+
+    Output channels: (chatbot, msg, timings, sources, trace, thread_id, status).
+    """
     if not message or not message.strip():
-        yield history, "", "### ⏱ Тайминги\n\n_Пустой запрос_", "### 📚 Источники\n\n_—_", "_—_", ""
+        yield history, "", "### ⏱ Тайминги\n\n_Пустой запрос_", "### 📚 Источники\n\n_—_", "_—_", "", IDLE_STATUS
         return
 
     history = history + [{"role": "user", "content": message}]
@@ -215,6 +221,7 @@ def respond(message: str, history: list):
         sources_panel,
         "_(режим Быстрый — trace не используется)_",
         "",
+        "🤖 LLM пишет ответ потоком…",
     )
 
     t1 = time.perf_counter()
@@ -229,7 +236,7 @@ def respond(message: str, history: list):
             accumulated += chunk
             history[-1]["content"] = accumulated
             yield (
-                history, "",
+                list(history), "",
                 "### ⏱ Тайминги\n\n"
                 f"- 🔍 **Retrieval:** {retrieval_ms:.0f} ms\n"
                 f"- ⚡ **TTFT (1st token):** {ttft_ms:.0f} ms\n"
@@ -237,11 +244,12 @@ def respond(message: str, history: list):
                 sources_panel,
                 "_(режим Быстрый — trace не используется)_",
                 "",
+                f"🤖 LLM пишет ответ… {len(accumulated)} символов",
             )
 
         llm_total_ms = (time.perf_counter() - t1) * 1000
         yield (
-            history, "",
+            list(history), "",
             "### ⏱ Тайминги последнего запроса\n\n"
             f"- 🔍 **Retrieval (embed + Qdrant):** {retrieval_ms:.0f} ms\n"
             f"- ⚡ **TTFT (time to first token):** {ttft_ms:.0f} ms\n"
@@ -250,6 +258,7 @@ def respond(message: str, history: list):
             sources_panel,
             "_(режим Быстрый — trace не используется)_",
             "",
+            f"✅ Готово за {(retrieval_ms + llm_total_ms) / 1000:.1f} сек",
         )
     except Exception as exc:
         history[-1]["content"] = (
@@ -257,11 +266,12 @@ def respond(message: str, history: list):
             f"Попробуй через 30-60 секунд."
         )
         yield (
-            history, "",
+            list(history), "",
             _format_timings(retrieval_ms, None, type(exc).__name__),
             sources_panel,
             "_(режим Быстрый — trace не используется)_",
             "",
+            f"⚠️ Ошибка LLM ({type(exc).__name__})",
         )
 
 
@@ -272,10 +282,11 @@ def respond_agent(message: str, history: list, thread_id_state: str):
     MemorySaver checkpoint (shared across thread_id requests) does not
     leak old tool calls into the panel. Yields progress updates after
     each node fires so the user sees status changes instead of a 15-30s
-    blank wait.
+    blank wait. Status is rendered both in a dedicated status_md component
+    (always visible) and in the chat bubble for the in-flight reply.
     """
     if not message or not message.strip():
-        yield history, "", "_Пустой запрос_", "_—_", "_—_", thread_id_state
+        yield history, "", "_Пустой запрос_", "_—_", "_—_", thread_id_state, IDLE_STATUS
         return
 
     try:
@@ -285,7 +296,7 @@ def respond_agent(message: str, history: list, thread_id_state: str):
             {"role": "user", "content": message},
             {"role": "assistant", "content": f"⚠️ Запрос отклонён guardrails: {e}"},
         ]
-        yield history, "", "_Отклонён guardrails_", "_—_", "_—_", thread_id_state
+        yield history, "", "_Отклонён guardrails_", "_—_", "_—_", thread_id_state, f"⚠️ Guardrail: {e}"
         return
 
     history = history + [{"role": "user", "content": message}]
@@ -300,7 +311,7 @@ def respond_agent(message: str, history: list, thread_id_state: str):
     step_counter = 0
     iteration_count = 0
 
-    # Status messages shown in the chat bubble while each tool is running.
+    # Status messages shown in both the chat bubble and the status_md component.
     TOOL_STATUS = {
         "documentation_search": "📚 Ищу в документации scikit-learn…",
         "python_repl": "🧮 Считаю в Python REPL…",
@@ -336,14 +347,15 @@ def respond_agent(message: str, history: list, thread_id_state: str):
             f"- 🛠 **Tool-вызовов:** {len(trace_steps)}"
         )
 
-    # Initial placeholder: chat bubble + reset side panels.
-    history.append({"role": "assistant", "content": "🤔 Думаю…"})
+    # Initial placeholder: chat bubble + reset side panels + status.
+    history.append({"role": "assistant", "content": "🤔 Думаю, какой tool нужен…"})
     yield (
-        history, "",
+        list(history), "",
         render_timings(),
         render_sources(),
         render_trace(),
         thread_id,
+        "🤔 LLM решает, какой инструмент вызвать…",
     )
 
     try:
@@ -374,27 +386,32 @@ def respond_agent(message: str, history: list, thread_id_state: str):
                                         latency_ms=0,
                                     )
                                 )
-                                history[-1]["content"] = TOOL_STATUS.get(
+                                status_line = TOOL_STATUS.get(
                                     tname, f"⚙️ Вызываю tool `{tname}`…"
                                 )
+                                history[-1]["content"] = status_line
+                                args_preview = str(tc.get("args", {}))[:80]
                                 yield (
-                                    history, "",
+                                    list(history), "",
                                     render_timings(),
                                     render_sources(),
                                     render_trace(),
                                     thread_id,
+                                    f"{status_line}  ·  `{args_preview}`",
                                 )
                         else:
                             # Final assistant answer (no more tool_calls).
                             raw_answer = m.content
                             safe_answer, _ = check_output(raw_answer, tools_used)
                             history[-1]["content"] = safe_answer
+                            elapsed_s = (time.perf_counter() - t0)
                             yield (
-                                history, "",
+                                list(history), "",
                                 render_timings(final=True),
                                 render_sources(),
                                 render_trace(),
                                 thread_id,
+                                f"✅ Готово за {elapsed_s:.1f} сек · {len(trace_steps)} tool-вызовов · {iteration_count} итераций",
                             )
                 elif node_name == "tool_executor":
                     for m in new_messages:
@@ -402,52 +419,66 @@ def respond_agent(message: str, history: list, thread_id_state: str):
                             continue
                         content = str(m.content) if m.content is not None else ""
                         # Fill the most-recent in-progress step's output.
+                        last_tool = None
                         for s in reversed(trace_steps):
                             if s.output == "(в процессе)":
                                 s.output = content[:500]
+                                last_tool = s.tool
                                 break
                         # Extract sources block emitted by documentation_search.
                         if "Sources:" in content:
                             tail = content.split("Sources:", 1)[1]
                             for line in tail.strip().splitlines():
                                 url = line.strip().lstrip("- ").strip()
-                                if url and not any(s.url == url for s in sources):
+                                if url and not any(src.url == url for src in sources):
                                     sources.append(AgentSource(url=url, snippet=""))
                         history[-1]["content"] = "🔍 Анализирую полученные данные…"
                         yield (
-                            history, "",
+                            list(history), "",
                             render_timings(),
                             render_sources(),
                             render_trace(),
                             thread_id,
+                            f"🔍 Анализирую результат `{last_tool or '?'}` ({len(content)} симв.), решаю что делать дальше…",
                         )
     except Exception as exc:
         history[-1]["content"] = (
             f"⚠️ Agent error: {type(exc).__name__}: {exc}"
         )
         yield (
-            history, "",
+            list(history), "",
             render_timings(final=True),
             render_sources(),
             render_trace(),
             thread_id,
+            f"⚠️ {type(exc).__name__}: {exc}",
         )
         return
 
 
 def _route_respond(message, history, mode, thread_id_state):
+    """Route to /chat or /agent handler. Both yield 7-tuples:
+    (chatbot, msg, timings, sources, trace, thread_id, status).
+    """
     if mode == "Агент (/agent)":
         yield from respond_agent(message, history, thread_id_state)
     else:
+        # respond() yields 7-tuples too (last element = status). We just
+        # need to fill thread_id_state through unchanged.
         for out in respond(message, history):
-            yield out[0], out[1], out[2], out[3], out[4], thread_id_state
+            chatbot, msg_val, timings, src, trace, _empty, status = out
+            yield chatbot, msg_val, timings, src, trace, thread_id_state, status
 
 
 CSS = """
 .gradio-container { max-width: 100% !important; padding: 1rem !important; }
-#chatbot { height: calc(100vh - 220px) !important; min-height: 500px !important; }
+#chatbot { height: calc(100vh - 280px) !important; min-height: 440px !important; }
 #side-panel { height: calc(100vh - 220px) !important; overflow-y: auto !important;
               padding: 1rem !important; border-left: 1px solid #ddd !important; }
+#status-line { padding: 0.5rem 0.75rem !important; margin: 0 0 0.5rem 0 !important;
+               border-left: 4px solid #7c3aed !important; background: #f5f3ff !important;
+               border-radius: 4px !important; font-size: 0.95rem !important; }
+#status-line p { margin: 0 !important; }
 """
 
 with gr.Blocks(
@@ -464,6 +495,10 @@ with gr.Blocks(
     )
     with gr.Row():
         with gr.Column(scale=3):
+            status_md = gr.Markdown(
+                IDLE_STATUS,
+                elem_id="status-line",
+            )
             chatbot = gr.Chatbot(
                 elem_id="chatbot",
                 type="messages",
@@ -547,12 +582,12 @@ with gr.Blocks(
     msg.submit(
         _route_respond,
         [msg, chatbot, mode_radio, thread_id_state],
-        [chatbot, msg, timings_md, sources_md, trace_md, thread_id_state],
+        [chatbot, msg, timings_md, sources_md, trace_md, thread_id_state, status_md],
     )
     send.click(
         _route_respond,
         [msg, chatbot, mode_radio, thread_id_state],
-        [chatbot, msg, timings_md, sources_md, trace_md, thread_id_state],
+        [chatbot, msg, timings_md, sources_md, trace_md, thread_id_state, status_md],
     )
 
 
